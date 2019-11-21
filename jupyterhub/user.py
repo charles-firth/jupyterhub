@@ -1,5 +1,6 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+import json
 import warnings
 from collections import defaultdict
 from datetime import datetime
@@ -21,6 +22,7 @@ from .crypto import decrypt
 from .crypto import encrypt
 from .crypto import EncryptionUnavailable
 from .crypto import InvalidToken
+from .metrics import RUNNING_SERVERS
 from .metrics import TOTAL_USERS
 from .objects import Server
 from .spawner import LocalProcessSpawner
@@ -350,6 +352,11 @@ class User:
         return quote(self.name, safe='@~')
 
     @property
+    def json_escaped_name(self):
+        """The user name, escaped for use in javascript inserts, etc."""
+        return json.dumps(self.name)[1:-1]
+
+    @property
     def proxy_spec(self):
         """The proxy routespec for my default server"""
         if self.settings.get('subdomain_host'):
@@ -382,9 +389,14 @@ class User:
         Full name.domain/path if using subdomains, otherwise just my /base/url
         """
         if self.settings.get('subdomain_host'):
-            return '{host}{path}'.format(host=self.host, path=self.base_url)
+            url = '{host}{path}'.format(host=self.host, path=self.base_url)
         else:
-            return self.base_url
+            url = self.base_url
+
+        if self.settings.get('default_server_name'):
+            return url_path_join(url, self.settings.get('default_server_name'))
+        else:
+            return url
 
     def server_url(self, server_name=''):
         """Get the url for a server with a given name"""
@@ -522,17 +534,19 @@ class User:
 
         # trigger pre-spawn hook on authenticator
         authenticator = self.authenticator
-        if authenticator:
-            await maybe_future(authenticator.pre_spawn_start(self, spawner))
-
-        spawner._start_pending = True
-        # update spawner start time, and activity for both spawner and user
-        self.last_activity = (
-            spawner.orm_spawner.started
-        ) = spawner.orm_spawner.last_activity = datetime.utcnow()
-        db.commit()
-        # wait for spawner.start to return
         try:
+            if authenticator:
+                # pre_spawn_start can thow errors that can lead to a redirect loop
+                # if left uncaught (see https://github.com/jupyterhub/jupyterhub/issues/2683)
+                await maybe_future(authenticator.pre_spawn_start(self, spawner))
+
+            spawner._start_pending = True
+            # update spawner start time, and activity for both spawner and user
+            self.last_activity = (
+                spawner.orm_spawner.started
+            ) = spawner.orm_spawner.last_activity = datetime.utcnow()
+            db.commit()
+            # wait for spawner.start to return
             # run optional preparation work to bootstrap the notebook
             await maybe_future(spawner.run_pre_spawn_hook())
             if self.settings.get('internal_ssl'):
@@ -718,6 +732,7 @@ class User:
         spawner = self.spawners[server_name]
         spawner._spawn_pending = False
         spawner._start_pending = False
+        spawner._check_pending = False
         spawner.stop_polling()
         spawner._stop_pending = True
 
@@ -753,6 +768,7 @@ class User:
                     self.db.delete(oauth_client)
             self.db.commit()
             self.log.debug("Finished stopping %s", spawner._log_name)
+            RUNNING_SERVERS.dec()
         finally:
             spawner.orm_spawner.started = None
             self.db.commit()

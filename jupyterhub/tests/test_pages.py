@@ -92,8 +92,9 @@ async def test_home_auth(app):
 
 
 async def test_admin_no_auth(app):
-    r = await get_page('admin', app)
-    assert r.status_code == 403
+    r = await get_page('admin', app, allow_redirects=False)
+    assert r.status_code == 302
+    assert '/hub/login' in r.headers['Location']
 
 
 async def test_admin_not_admin(app):
@@ -107,6 +108,13 @@ async def test_admin(app):
     r = await get_page('admin', app, cookies=cookies, allow_redirects=False)
     r.raise_for_status()
     assert r.url.endswith('/admin')
+
+
+async def test_admin_version(app):
+    cookies = await app.login_user('admin')
+    r = await get_page('admin', app, cookies=cookies, allow_redirects=False)
+    r.raise_for_status()
+    assert "version_footer" in r.text
 
 
 @pytest.mark.parametrize('sort', ['running', 'last_activity', 'admin', 'name'])
@@ -398,6 +406,47 @@ async def test_user_redirect(app, username):
     assert path == ujoin(app.base_url, '/user/%s/notebooks/test.ipynb' % name)
 
 
+async def test_user_redirect_hook(app, username):
+    """
+    Test proper behavior of user_redirect_hook
+    """
+    name = username
+    cookies = await app.login_user(name)
+
+    async def dummy_redirect(path, request, user, base_url):
+        assert base_url == app.base_url
+        assert path == 'redirect-to-terminal'
+        assert request.uri == ujoin(
+            base_url, 'hub', 'user-redirect', 'redirect-to-terminal'
+        )
+        url = ujoin(user.url, '/terminals/1')
+        return url
+
+    app.user_redirect_hook = dummy_redirect
+
+    r = await get_page('/user-redirect/redirect-to-terminal', app)
+    r.raise_for_status()
+    print(urlparse(r.url))
+    path = urlparse(r.url).path
+    assert path == ujoin(app.base_url, '/hub/login')
+    query = urlparse(r.url).query
+    assert query == urlencode(
+        {'next': ujoin(app.hub.base_url, '/user-redirect/redirect-to-terminal')}
+    )
+
+    # We don't actually want to start the server by going through spawn - just want to make sure
+    # the redirect is to the right place
+    r = await get_page(
+        '/user-redirect/redirect-to-terminal',
+        app,
+        cookies=cookies,
+        allow_redirects=False,
+    )
+    r.raise_for_status()
+    redirected_url = urlparse(r.headers['Location'])
+    assert redirected_url.path == ujoin(app.base_url, 'user', username, 'terminals/1')
+
+
 async def test_user_redirect_deprecated(app, username):
     """redirecting from /user/someonelse/ URLs (deprecated)"""
     name = username
@@ -611,7 +660,9 @@ async def test_static_files(app):
     r = await async_requests.get(ujoin(base_url, 'logo'))
     r.raise_for_status()
     assert r.headers['content-type'] == 'image/png'
-    r = await async_requests.get(ujoin(base_url, 'static', 'images', 'jupyter.png'))
+    r = await async_requests.get(
+        ujoin(base_url, 'static', 'images', 'jupyterhub-80.png')
+    )
     r.raise_for_status()
     assert r.headers['content-type'] == 'image/png'
     r = await async_requests.get(ujoin(base_url, 'static', 'css', 'style.min.css'))
@@ -787,3 +838,42 @@ async def test_metrics_auth(app):
 async def test_health_check_request(app):
     r = await get_page('health', app)
     assert r.status_code == 200
+
+
+async def test_pre_spawn_start_exc_no_form(app):
+    exc = "pre_spawn_start error"
+
+    # throw exception from pre_spawn_start
+    @gen.coroutine
+    def mock_pre_spawn_start(user, spawner):
+        raise Exception(exc)
+
+    with mock.patch.object(app.authenticator, 'pre_spawn_start', mock_pre_spawn_start):
+        cookies = await app.login_user('summer')
+        # spawn page should thow a 500 error and show the pre_spawn_start error message
+        r = await get_page('spawn', app, cookies=cookies)
+        assert r.status_code == 500
+        assert exc in r.text
+
+
+async def test_pre_spawn_start_exc_options_form(app):
+    exc = "pre_spawn_start error"
+
+    # throw exception from pre_spawn_start
+    @gen.coroutine
+    def mock_pre_spawn_start(user, spawner):
+        raise Exception(exc)
+
+    with mock.patch.dict(
+        app.users.settings, {'spawner_class': FormSpawner}
+    ), mock.patch.object(app.authenticator, 'pre_spawn_start', mock_pre_spawn_start):
+        cookies = await app.login_user('spring')
+        user = app.users['spring']
+        # spawn page shouldn't throw any error until the spawn is started
+        r = await get_page('spawn', app, cookies=cookies)
+        assert r.url.endswith('/spawn')
+        r.raise_for_status()
+        assert FormSpawner.options_form in r.text
+        # spawning the user server should throw the pre_spawn_start error
+        with pytest.raises(Exception, match="%s" % exc):
+            await user.spawn()

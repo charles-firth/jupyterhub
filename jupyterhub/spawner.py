@@ -86,6 +86,7 @@ class Spawner(LoggingConfigurable):
     _start_pending = False
     _stop_pending = False
     _proxy_pending = False
+    _check_pending = False
     _waiting_for_response = False
     _jupyterhub_version = None
     _spawn_future = None
@@ -121,6 +122,8 @@ class Spawner(LoggingConfigurable):
             return 'spawn'
         elif self._stop_pending:
             return 'stop'
+        elif self._check_pending:
+            return 'check'
         return None
 
     @property
@@ -207,8 +210,6 @@ class Spawner(LoggingConfigurable):
             return self.orm_spawner.name
         return ''
 
-    hub = Any()
-    authenticator = Any()
     internal_ssl = Bool(False)
     internal_trust_bundles = Dict()
     internal_certs_location = Unicode('')
@@ -1351,7 +1352,8 @@ class LocalProcessSpawner(Spawner):
         home = user.pw_dir
 
         # Create dir for user's certs wherever we're starting
-        out_dir = "{home}/.jupyterhub/jupyterhub-certs".format(home=home)
+        hub_dir = "{home}/.jupyterhub".format(home=home)
+        out_dir = "{hub_dir}/jupyterhub-certs".format(hub_dir=hub_dir)
         shutil.rmtree(out_dir, ignore_errors=True)
         os.makedirs(out_dir, 0o700, exist_ok=True)
 
@@ -1365,7 +1367,7 @@ class LocalProcessSpawner(Spawner):
         ca = os.path.join(out_dir, os.path.basename(paths['cafile']))
 
         # Set cert ownership to user
-        for f in [out_dir, key, cert, ca]:
+        for f in [hub_dir, out_dir, key, cert, ca]:
             shutil.chown(f, user=uid, group=gid)
 
         return {"keyfile": key, "certfile": cert, "cafile": ca}

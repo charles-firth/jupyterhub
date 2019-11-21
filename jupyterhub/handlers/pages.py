@@ -2,6 +2,7 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import asyncio
+import codecs
 import copy
 import time
 from collections import defaultdict
@@ -13,6 +14,7 @@ from tornado import gen
 from tornado import web
 from tornado.httputil import url_concat
 
+from .. import __version__
 from .. import orm
 from ..metrics import SERVER_POLL_DURATION_SECONDS
 from ..metrics import ServerPollStatus
@@ -61,9 +63,9 @@ class HomeHandler(BaseHandler):
         # to establish that this is an explicit spawn request rather
         # than an implicit one, which can be caused by any link to `/user/:name(/:server_name)`
         if user.active:
-            url = url_path_join(self.base_url, 'user', user.name)
+            url = url_path_join(self.base_url, 'user', user.escaped_name)
         else:
-            url = url_path_join(self.hub.base_url, 'spawn', user.name)
+            url = url_path_join(self.hub.base_url, 'spawn', user.escaped_name)
 
         html = self.render_template(
             'home.html',
@@ -117,6 +119,23 @@ class SpawnHandler(BaseHandler):
             if user is None:
                 raise web.HTTPError(404, "No such user: %s" % for_user)
 
+        if server_name:
+            if not self.allow_named_servers:
+                raise web.HTTPError(400, "Named servers are not enabled.")
+            if (
+                self.named_server_limit_per_user > 0
+                and server_name not in user.orm_spawners
+            ):
+                named_spawners = list(user.all_spawners(include_default=False))
+                if self.named_server_limit_per_user <= len(named_spawners):
+                    raise web.HTTPError(
+                        400,
+                        "User {} already has the maximum of {} named servers."
+                        "  One must be deleted before a new server can be created".format(
+                            user.name, self.named_server_limit_per_user
+                        ),
+                    )
+
         if not self.allow_named_servers and user.running:
             url = self.get_next_url(user, default=user.server_url(server_name))
             self.log.info("User is running: %s", user.name)
@@ -132,7 +151,7 @@ class SpawnHandler(BaseHandler):
         # which may get handled by the default server if they aren't ready yet
 
         pending_url = url_path_join(
-            self.hub.base_url, "spawn-pending", user.name, server_name
+            self.hub.base_url, "spawn-pending", user.escaped_name, server_name
         )
 
         if self.get_argument('next', None):
@@ -171,7 +190,16 @@ class SpawnHandler(BaseHandler):
                 spawner._spawn_future = None
             # not running, no form. Trigger spawn and redirect back to /user/:name
             f = asyncio.ensure_future(self.spawn_single_user(user, server_name))
-            await asyncio.wait([f], timeout=1)
+            done, pending = await asyncio.wait([f], timeout=1)
+            # If spawn_single_user throws an exception, raise a 500 error
+            # otherwise it may cause a redirect loop
+            if f.done() and f.exception():
+                exc = f.exception()
+                raise web.HTTPError(
+                    500,
+                    "Error in Authenticator.pre_spawn_start: %s %s"
+                    % (type(exc).__name__, str(exc)),
+                )
             self.redirect(pending_url)
 
     @web.authenticated
@@ -219,7 +247,7 @@ class SpawnHandler(BaseHandler):
         next_url = self.get_next_url(
             user,
             default=url_path_join(
-                self.hub.base_url, "spawn-pending", user.name, server_name
+                self.hub.base_url, "spawn-pending", user.escaped_name, server_name
             ),
         )
         self.redirect(next_url)
@@ -282,7 +310,9 @@ class SpawnPendingHandler(BaseHandler):
             # We should point the user to Home if the most recent spawn failed.
             exc = spawner._spawn_future.exception()
             self.log.error("Previous spawn for %s failed: %s", spawner._log_name, exc)
-            spawn_url = url_path_join(self.hub.base_url, "spawn", user.escaped_name)
+            spawn_url = url_path_join(
+                self.hub.base_url, "spawn", user.escaped_name, server_name
+            )
             self.set_status(500)
             html = self.render_template(
                 "not_running.html",
@@ -327,7 +357,9 @@ class SpawnPendingHandler(BaseHandler):
         # further, set status to 404 because this is not
         # serving the expected page
         if status is not None:
-            spawn_url = url_path_join(self.hub.base_url, "spawn", user.escaped_name)
+            spawn_url = url_path_join(
+                self.hub.base_url, "spawn", user.escaped_name, server_name
+            )
             html = self.render_template(
                 "not_running.html",
                 user=user,
@@ -348,6 +380,7 @@ class SpawnPendingHandler(BaseHandler):
 class AdminHandler(BaseHandler):
     """Render the admin page."""
 
+    @web.authenticated
     @admin_only
     def get(self):
         available = {'name', 'admin', 'running', 'last_activity'}
@@ -407,6 +440,7 @@ class AdminHandler(BaseHandler):
             sort={s: o for s, o in zip(sorts, orders)},
             allow_named_servers=self.allow_named_servers,
             named_server_limit_per_user=self.named_server_limit_per_user,
+            server_version='{} {}'.format(__version__, self.version_hash),
         )
         self.finish(html)
 

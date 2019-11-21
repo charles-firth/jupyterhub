@@ -33,7 +33,9 @@ from tornado.web import RequestHandler
 from .. import __version__
 from .. import orm
 from ..metrics import PROXY_ADD_DURATION_SECONDS
+from ..metrics import PROXY_DELETE_DURATION_SECONDS
 from ..metrics import ProxyAddStatus
+from ..metrics import ProxyDeleteStatus
 from ..metrics import RUNNING_SERVERS
 from ..metrics import SERVER_POLL_DURATION_SECONDS
 from ..metrics import SERVER_SPAWN_DURATION_SECONDS
@@ -141,6 +143,10 @@ class BaseHandler(RequestHandler):
         return self.settings['hub']
 
     @property
+    def app(self):
+        return self.settings['app']
+
+    @property
     def proxy(self):
         return self.settings['proxy']
 
@@ -155,6 +161,10 @@ class BaseHandler(RequestHandler):
     @property
     def oauth_provider(self):
         return self.settings['oauth_provider']
+
+    @property
+    def eventlog(self):
+        return self.settings['eventlog']
 
     def finish(self, *args, **kwargs):
         """Roll back any uncommitted transactions from the handler."""
@@ -484,6 +494,8 @@ class BaseHandler(RequestHandler):
             path=url_path_join(self.base_url, 'services'),
             **kwargs
         )
+        # Reset _jupyterhub_user
+        self._jupyterhub_user = None
 
     def _set_cookie(self, key, value, encrypted=True, **overrides):
         """Setting any cookie should go through here
@@ -759,6 +771,7 @@ class BaseHandler(RequestHandler):
             active_counts['spawn_pending'] + active_counts['proxy_pending']
         )
         active_count = active_counts['active']
+        RUNNING_SERVERS.set(active_count)
 
         concurrent_spawn_limit = self.concurrent_spawn_limit
         active_server_limit = self.active_server_limit
@@ -842,10 +855,14 @@ class BaseHandler(RequestHandler):
                 "User %s took %.3f seconds to start", user_server_name, toc - tic
             )
             self.statsd.timing('spawner.success', (toc - tic) * 1000)
-            RUNNING_SERVERS.inc()
             SERVER_SPAWN_DURATION_SECONDS.labels(
                 status=ServerSpawnStatus.success
             ).observe(time.perf_counter() - spawn_start_time)
+            self.eventlog.record_event(
+                'hub.jupyter.org/server-action',
+                1,
+                {'action': 'start', 'username': user.name, 'servername': server_name},
+            )
             proxy_add_start_time = time.perf_counter()
             spawner._proxy_pending = True
             try:
@@ -854,6 +871,7 @@ class BaseHandler(RequestHandler):
                 PROXY_ADD_DURATION_SECONDS.labels(status='success').observe(
                     time.perf_counter() - proxy_add_start_time
                 )
+                RUNNING_SERVERS.inc()
             except Exception:
                 self.log.exception("Failed to add %s to proxy!", user_server_name)
                 self.log.error(
@@ -876,7 +894,7 @@ class BaseHandler(RequestHandler):
             # clear spawner._spawn_future when it's done
             # keep an exception around, though, to prevent repeated implicit spawns
             # if spawn is failing
-            if f.exception() is None:
+            if f.cancelled() or f.exception() is None:
                 spawner._spawn_future = None
             # Now we're all done. clear _spawn_pending flag
             spawner._spawn_pending = False
@@ -887,7 +905,7 @@ class BaseHandler(RequestHandler):
         # update failure count and abort if consecutive failure limit
         # is reached
         def _track_failure_count(f):
-            if f.exception() is None:
+            if f.cancelled() or f.exception() is None:
                 # spawn succeeded, reset failure count
                 self.settings['failure_count'] = 0
                 return
@@ -993,7 +1011,18 @@ class BaseHandler(RequestHandler):
         self.log.warning(
             "User %s server stopped, with exit code: %s", user.name, status
         )
-        await self.proxy.delete_user(user, server_name)
+        proxy_deletion_start_time = time.perf_counter()
+        try:
+            await self.proxy.delete_user(user, server_name)
+            PROXY_DELETE_DURATION_SECONDS.labels(
+                status=ProxyDeleteStatus.success
+            ).observe(time.perf_counter() - proxy_deletion_start_time)
+        except Exception:
+            PROXY_DELETE_DURATION_SECONDS.labels(
+                status=ProxyDeleteStatus.failure
+            ).observe(time.perf_counter() - proxy_deletion_start_time)
+            raise
+
         await user.stop(server_name)
 
     async def stop_single_user(self, user, server_name=''):
@@ -1016,17 +1045,32 @@ class BaseHandler(RequestHandler):
             tic = time.perf_counter()
             try:
                 await self.proxy.delete_user(user, server_name)
+                PROXY_DELETE_DURATION_SECONDS.labels(
+                    status=ProxyDeleteStatus.success
+                ).observe(time.perf_counter() - tic)
+
                 await user.stop(server_name)
                 toc = time.perf_counter()
                 self.log.info(
                     "User %s server took %.3f seconds to stop", user.name, toc - tic
                 )
                 self.statsd.timing('spawner.stop', (toc - tic) * 1000)
-                RUNNING_SERVERS.dec()
                 SERVER_STOP_DURATION_SECONDS.labels(
                     status=ServerStopStatus.success
                 ).observe(toc - tic)
+                self.eventlog.record_event(
+                    'hub.jupyter.org/server-action',
+                    1,
+                    {
+                        'action': 'stop',
+                        'username': user.name,
+                        'servername': server_name,
+                    },
+                )
             except:
+                PROXY_DELETE_DURATION_SECONDS.labels(
+                    status=ProxyDeleteStatus.failure
+                ).observe(time.perf_counter() - tic)
                 SERVER_STOP_DURATION_SECONDS.labels(
                     status=ServerStopStatus.failure
                 ).observe(time.perf_counter() - tic)
@@ -1357,7 +1401,9 @@ class UserUrlHandler(BaseHandler):
             return
 
         pending_url = url_concat(
-            url_path_join(self.hub.base_url, 'spawn-pending', user.name, server_name),
+            url_path_join(
+                self.hub.base_url, 'spawn-pending', user.escaped_name, server_name
+            ),
             {'next': self.request.uri},
         )
         if spawner.pending or spawner._failed:
@@ -1371,7 +1417,7 @@ class UserUrlHandler(BaseHandler):
         # without explicit user action
         self.set_status(503)
         spawn_url = url_concat(
-            url_path_join(self.hub.base_url, "spawn", user.name, server_name),
+            url_path_join(self.hub.base_url, "spawn", user.escaped_name, server_name),
             {"next": self.request.uri},
         )
         html = self.render_template(
@@ -1448,19 +1494,35 @@ class UserRedirectHandler(BaseHandler):
 
     If the user is not logged in, send to login URL, redirecting back here.
 
+    If c.JupyterHub.user_redirect_hook is set, the return value of that
+    callable is used to generate the redirect URL.
+
     .. versionadded:: 0.7
     """
 
     @web.authenticated
-    def get(self, path):
-        user = self.current_user
-        user_url = url_path_join(user.url, path)
-        if self.request.query:
-            user_url = url_concat(user_url, parse_qsl(self.request.query))
+    async def get(self, path):
+        # If hook is present to generate URL to redirect to, use that instead
+        # of the default. The configurer is responsible for making sure this
+        # URL is right. If None is returned by the hook, we do our normal
+        # processing
+        url = None
+        if self.app.user_redirect_hook:
+            url = await maybe_future(
+                self.app.user_redirect_hook(
+                    path, self.request, self.current_user, self.base_url
+                )
+            )
+        if url is None:
+            user = self.current_user
+            user_url = url_path_join(user.url, path)
+            if self.request.query:
+                user_url = url_concat(user_url, parse_qsl(self.request.query))
 
-        url = url_concat(
-            url_path_join(self.hub.base_url, "spawn", user.name), {"next": user_url}
-        )
+            url = url_concat(
+                url_path_join(self.hub.base_url, "spawn", user.escaped_name),
+                {"next": user_url},
+            )
 
         self.redirect(url)
 

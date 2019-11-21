@@ -39,11 +39,7 @@ RUNNING_SERVERS = Gauge(
     'running_servers', 'the number of user servers currently running'
 )
 
-RUNNING_SERVERS.set(0)
-
-TOTAL_USERS = Gauge('total_users', 'toal number of users')
-
-TOTAL_USERS.set(0)
+TOTAL_USERS = Gauge('total_users', 'total number of users')
 
 CHECK_ROUTES_DURATION_SECONDS = Histogram(
     'check_routes_duration_seconds', 'Time taken to validate all routes in proxy'
@@ -137,6 +133,29 @@ class ServerStopStatus(Enum):
 
 for s in ServerStopStatus:
     SERVER_STOP_DURATION_SECONDS.labels(status=s)
+
+
+PROXY_DELETE_DURATION_SECONDS = Histogram(
+    'proxy_delete_duration_seconds',
+    'duration for deleting user routes from proxy',
+    ['status'],
+)
+
+
+class ProxyDeleteStatus(Enum):
+    """
+    Possible values for 'status' label of PROXY_DELETE_DURATION_SECONDS
+    """
+
+    success = 'success'
+    failure = 'failure'
+
+    def __str__(self):
+        return self.value
+
+
+for s in ProxyDeleteStatus:
+    PROXY_DELETE_DURATION_SECONDS.labels(status=s)
 
 
 def prometheus_log_method(handler):
