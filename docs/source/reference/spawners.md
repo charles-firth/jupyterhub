@@ -27,8 +27,8 @@ Some examples include:
   servers using batch systems
 - [YarnSpawner](https://github.com/jupyterhub/yarnspawner) for spawning notebook
   servers in YARN containers on a Hadoop cluster
-- [RemoteSpawner](https://github.com/zonca/remotespawner) to spawn notebooks
-  and a remote server and tunnel the port via SSH
+- [SSHSpawner](https://github.com/NERSC/sshspawner) to spawn notebooks
+  on a remote server using SSH
 
 
 ## Spawner control methods
@@ -74,7 +74,7 @@ It should return `None` if it is still running,
 and an integer exit status, otherwise.
 
 For the local process case, `Spawner.poll` uses `os.kill(PID, 0)`
-to check if the local process is still running.
+to check if the local process is still running. On Windows, it uses `psutil.pid_exists`.
 
 ### Spawner.stop
 

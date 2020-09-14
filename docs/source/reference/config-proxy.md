@@ -83,8 +83,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
         # websocket headers
+        proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
     }
 
     # Managing requests to verify letsencrypt host
@@ -199,8 +202,8 @@ In case of the need to run the jupyterhub under /jhub/ or other location please 
 
 httpd.conf amendments:
 ```bash
- RewriteRule /jhub/(.*) ws://127.0.0.1:8000/jhub/$1 [P,L]
- RewriteRule /jhub/(.*) http://127.0.0.1:8000/jhub/$1 [P,L]
+ RewriteRule /jhub/(.*) ws://127.0.0.1:8000/jhub/$1 [NE.P,L]
+ RewriteRule /jhub/(.*) http://127.0.0.1:8000/jhub/$1 [NE,P,L]
  
  ProxyPass /jhub/ http://127.0.0.1:8000/jhub/
  ProxyPassReverse /jhub/  http://127.0.0.1:8000/jhub/

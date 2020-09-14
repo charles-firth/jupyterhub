@@ -201,7 +201,7 @@ class OAuthAuthorizeHandler(OAuthHandler, BaseHandler):
     def needs_oauth_confirm(self, user, oauth_client):
         """Return whether the given oauth client needs to prompt for access for the given user
 
-        Checks whitelist for oauth clients
+        Checks list for oauth clients that don't need confirmation
 
         (i.e. the user's own server)
 
@@ -214,22 +214,21 @@ class OAuthAuthorizeHandler(OAuthHandler, BaseHandler):
         if (
             # it's the user's own server
             oauth_client.identifier in own_oauth_client_ids
-            # or it's in the global whitelist
-            or oauth_client.identifier
-            in self.settings.get('oauth_no_confirm_whitelist', set())
+            # or it's in the global no-confirm list
+            or oauth_client.identifier in self.settings.get('oauth_no_confirm', set())
         ):
             return False
         # default: require confirmation
         return True
 
     @web.authenticated
-    def get(self):
+    async def get(self):
         """GET /oauth/authorization
 
         Render oauth confirmation page:
         "Server at ... would like permission to ...".
 
-        Users accessing their own server or a service whitelist
+        Users accessing their own server or a blessed service
         will skip confirmation.
         """
 
@@ -251,8 +250,14 @@ class OAuthAuthorizeHandler(OAuthHandler, BaseHandler):
                 return
 
             # Render oauth 'Authorize application...' page
+            auth_state = await self.current_user.get_auth_state()
             self.write(
-                self.render_template("oauth.html", scopes=scopes, oauth_client=client)
+                self.render_template(
+                    "oauth.html",
+                    auth_state=auth_state,
+                    scopes=scopes,
+                    oauth_client=client,
+                )
             )
 
         # Errors that should be shown to the user on the provider website

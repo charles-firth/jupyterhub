@@ -45,6 +45,18 @@ CHECK_ROUTES_DURATION_SECONDS = Histogram(
     'check_routes_duration_seconds', 'Time taken to validate all routes in proxy'
 )
 
+HUB_STARTUP_DURATION_SECONDS = Histogram(
+    'hub_startup_duration_seconds', 'Time taken for Hub to start'
+)
+
+INIT_SPAWNERS_DURATION_SECONDS = Histogram(
+    'init_spawners_duration_seconds', 'Time taken for spawners to initialize'
+)
+
+PROXY_POLL_DURATION_SECONDS = Histogram(
+    'proxy_poll_duration_seconds', 'duration for polling all routes from proxy'
+)
+
 
 class ServerSpawnStatus(Enum):
     """
@@ -163,9 +175,9 @@ def prometheus_log_method(handler):
     Tornado log handler for recording RED metrics.
 
     We record the following metrics:
-       Rate – the number of requests, per second, your services are serving.
-       Errors – the number of failed requests per second.
-       Duration – The amount of time each request takes expressed as a time interval.
+       Rate: the number of requests, per second, your services are serving.
+       Errors: the number of failed requests per second.
+       Duration: the amount of time each request takes expressed as a time interval.
 
     We use a fully qualified name of the handler as a label,
     rather than every url path to reduce cardinality.
